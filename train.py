@@ -491,6 +491,8 @@ def main():
 
     # ── STEP 10: Upload to Google Drive ───────────────────────────────────────
     print("\nSTEP 10 — Uploading model to Google Drive...")
+    # Rebuild drive service — connection times out during long training
+    drive_service = get_drive_service()
     parent_id = _find_folder_id(drive_service, DRIVE_PARENT_NAME)
     if parent_id is None:
         parent_id = _create_folder(drive_service, DRIVE_PARENT_NAME)
