@@ -113,6 +113,7 @@ def download_drive_folder(service, folder_id, local_path):
             out.write(buf.getvalue())
         print(f"    ⬇  {f['name']}")
 
+# ── UPDATED: upload with retry + chunked upload ──────────────────────────────
 def upload_folder_to_drive(service, local_path, drive_folder_name, parent_id=None):
     folder_id = _find_folder_id(service, drive_folder_name, parent_id=parent_id)
     if folder_id is None:
@@ -121,22 +122,31 @@ def upload_folder_to_drive(service, local_path, drive_folder_name, parent_id=Non
         filepath = os.path.join(local_path, filename)
         if not os.path.isfile(filepath):
             continue
-        media = MediaFileUpload(filepath, resumable=True)
+        media = MediaFileUpload(filepath, resumable=True, chunksize=1024*1024)
         q = (f"name='{filename}' and '{folder_id}' in parents "
              f"and trashed=false")
         existing = service.files().list(q=q, fields="files(id)").execute().get('files', [])
-        if existing:
-            service.files().update(
-                fileId=existing[0]['id'], media_body=media,
-                supportsAllDrives=True
-            ).execute()
-        else:
-            service.files().create(
-                body={'name': filename, 'parents': [folder_id]},
-                media_body=media, fields='id',
-                supportsAllDrives=True
-            ).execute()
-        print(f"    ⬆  {filename}")
+
+        # Retry up to 3 times
+        for attempt in range(3):
+            try:
+                if existing:
+                    service.files().update(
+                        fileId=existing[0]['id'], media_body=media,
+                        supportsAllDrives=True
+                    ).execute()
+                else:
+                    service.files().create(
+                        body={'name': filename, 'parents': [folder_id]},
+                        media_body=media, fields='id',
+                        supportsAllDrives=True
+                    ).execute()
+                print(f"    ⬆  {filename}")
+                break
+            except Exception as e:
+                print(f"    ⚠️ Attempt {attempt+1} failed for {filename}: {e}")
+                if attempt == 2:
+                    raise
     return folder_id
 
 # ── DATASET ──────────────────────────────────────────────────────────────────
