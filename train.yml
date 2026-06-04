@@ -1,0 +1,41 @@
+name: boAt BERT Delta Training
+
+on:
+  workflow_dispatch:           # Manual trigger for now
+  repository_dispatch:
+    types: [run-training]      # Can be triggered automatically later
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120       # 2 hour timeout for CPU training
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-train-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run delta training
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: python train.py
+
+      - name: Upload model as GitHub Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RA_model_${{ github.run_id }}
+          path: RA_model/
+          retention-days: 30

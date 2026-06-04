@@ -1,0 +1,12 @@
+torch
+transformers
+scikit-learn
+openpyxl
+pandas
+numpy
+gspread
+google-auth
+google-auth-httplib2
+google-api-python-client
+nltk
+nlpaug
