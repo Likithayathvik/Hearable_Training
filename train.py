@@ -9,11 +9,14 @@ import io
 import json
 import shutil
 import warnings
+import time
+import requests
 import numpy as np
 import pandas as pd
 import torch
 import nltk
 import gspread
+import google.auth.transport.requests
 
 from collections import Counter
 from datetime import datetime
@@ -29,7 +32,7 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload
 
 warnings.filterwarnings("ignore")
 nltk.download("wordnet", quiet=True)
@@ -72,6 +75,15 @@ def get_drive_service():
     )
     return build('drive', 'v3', credentials=creds)
 
+def get_access_token():
+    creds_json = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
+    creds = Credentials.from_service_account_info(
+        creds_json,
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    creds.refresh(google.auth.transport.requests.Request())
+    return creds.token
+
 def _find_folder_id(service, name, parent_id=None):
     q = (f"name='{name}' and mimeType='application/vnd.google-apps.folder' "
          f"and trashed=false")
@@ -113,40 +125,83 @@ def download_drive_folder(service, folder_id, local_path):
             out.write(buf.getvalue())
         print(f"    ⬇  {f['name']}")
 
-# ── UPDATED: upload with retry + chunked upload ──────────────────────────────
 def upload_folder_to_drive(service, local_path, drive_folder_name, parent_id=None):
     folder_id = _find_folder_id(service, drive_folder_name, parent_id=parent_id)
     if folder_id is None:
         folder_id = _create_folder(service, drive_folder_name, parent_id=parent_id)
+
+    token = get_access_token()
+    headers_base = {
+        'Authorization': f'Bearer {token}',
+        'X-Upload-Content-Type': 'application/octet-stream',
+    }
+
     for filename in os.listdir(local_path):
         filepath = os.path.join(local_path, filename)
         if not os.path.isfile(filepath):
             continue
-        media = MediaFileUpload(filepath, resumable=True, chunksize=1024*1024)
-        q = (f"name='{filename}' and '{folder_id}' in parents "
-             f"and trashed=false")
+
+        file_size = os.path.getsize(filepath)
+        q = f"name='{filename}' and '{folder_id}' in parents and trashed=false"
         existing = service.files().list(q=q, fields="files(id)").execute().get('files', [])
 
-        # Retry up to 3 times
         for attempt in range(3):
             try:
                 if existing:
-                    service.files().update(
-                        fileId=existing[0]['id'], media_body=media,
-                        supportsAllDrives=True
-                    ).execute()
+                    init_url = (
+                        f"https://www.googleapis.com/upload/drive/v3/files"
+                        f"/{existing[0]['id']}?uploadType=resumable&supportsAllDrives=true"
+                    )
+                    init_resp = requests.patch(
+                        init_url,
+                        headers={
+                            **headers_base,
+                            'Content-Type': 'application/json',
+                            'X-Upload-Content-Length': str(file_size),
+                        },
+                        json={},
+                        timeout=30
+                    )
                 else:
-                    service.files().create(
-                        body={'name': filename, 'parents': [folder_id]},
-                        media_body=media, fields='id',
-                        supportsAllDrives=True
-                    ).execute()
-                print(f"    ⬆  {filename}")
-                break
+                    init_url = (
+                        "https://www.googleapis.com/upload/drive/v3/files"
+                        "?uploadType=resumable&supportsAllDrives=true"
+                    )
+                    init_resp = requests.post(
+                        init_url,
+                        headers={
+                            **headers_base,
+                            'Content-Type': 'application/json',
+                            'X-Upload-Content-Length': str(file_size),
+                        },
+                        json={'name': filename, 'parents': [folder_id]},
+                        timeout=30
+                    )
+
+                upload_url = init_resp.headers['Location']
+
+                with open(filepath, 'rb') as f:
+                    upload_resp = requests.put(
+                        upload_url,
+                        data=f,
+                        headers={'Content-Length': str(file_size)},
+                        timeout=600
+                    )
+
+                if upload_resp.status_code in (200, 201):
+                    print(f"    ⬆  {filename}")
+                    break
+                else:
+                    raise Exception(
+                        f"Upload failed: {upload_resp.status_code} {upload_resp.text[:200]}"
+                    )
+
             except Exception as e:
                 print(f"    ⚠️ Attempt {attempt+1} failed for {filename}: {e}")
                 if attempt == 2:
                     raise
+                time.sleep(10)
+
     return folder_id
 
 # ── DATASET ──────────────────────────────────────────────────────────────────
