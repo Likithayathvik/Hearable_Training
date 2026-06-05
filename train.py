@@ -32,7 +32,7 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 warnings.filterwarnings("ignore")
 nltk.download("wordnet", quiet=True)
@@ -137,75 +137,44 @@ def download_drive_folder(service, folder_id, local_path):
         print(f"    ⬇  {f['name']}")
 
 def upload_folder_to_drive(service, local_path, drive_folder_name, parent_id=None):
+    # Create or find the subfolder inside the parent (owned by personal account)
     folder_id = _find_folder_id(service, drive_folder_name, parent_id=parent_id)
     if folder_id is None:
         folder_id = _create_folder(service, drive_folder_name, parent_id=parent_id)
-
-    token = get_access_token()
-    headers_base = {
-        'Authorization': f'Bearer {token}',
-        'X-Upload-Content-Type': 'application/octet-stream',
-    }
 
     for filename in os.listdir(local_path):
         filepath = os.path.join(local_path, filename)
         if not os.path.isfile(filepath):
             continue
 
-        file_size = os.path.getsize(filepath)
         q = f"name='{filename}' and '{folder_id}' in parents and trashed=false"
-        existing = service.files().list(q=q, fields="files(id)").execute().get('files', [])
+        existing = service.files().list(
+            q=q, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
+        ).execute().get('files', [])
+
+        media = MediaFileUpload(filepath, resumable=True)
 
         for attempt in range(3):
             try:
                 if existing:
-                    init_url = (
-                        f"https://www.googleapis.com/upload/drive/v3/files"
-                        f"/{existing[0]['id']}?uploadType=resumable&supportsAllDrives=true"
-                    )
-                    init_resp = requests.patch(
-                        init_url,
-                        headers={
-                            **headers_base,
-                            'Content-Type': 'application/json',
-                            'X-Upload-Content-Length': str(file_size),
-                        },
-                        json={},
-                        timeout=30
-                    )
+                    # Update existing file
+                    service.files().update(
+                        fileId=existing[0]['id'],
+                        media_body=media,
+                        supportsAllDrives=True,
+                    ).execute()
                 else:
-                    init_url = (
-                        "https://www.googleapis.com/upload/drive/v3/files"
-                        "?uploadType=resumable&supportsAllDrives=true"
-                    )
-                    init_resp = requests.post(
-                        init_url,
-                        headers={
-                            **headers_base,
-                            'Content-Type': 'application/json',
-                            'X-Upload-Content-Length': str(file_size),
-                        },
-                        json={'name': filename, 'parents': [folder_id]},
-                        timeout=30
-                    )
+                    # Create new file inside folder owned by personal account
+                    file_meta = {'name': filename, 'parents': [folder_id]}
+                    service.files().create(
+                        body=file_meta,
+                        media_body=media,
+                        fields='id',
+                        supportsAllDrives=True,
+                    ).execute()
 
-                upload_url = init_resp.headers['Location']
-
-                with open(filepath, 'rb') as f:
-                    upload_resp = requests.put(
-                        upload_url,
-                        data=f,
-                        headers={'Content-Length': str(file_size)},
-                        timeout=600
-                    )
-
-                if upload_resp.status_code in (200, 201):
-                    print(f"    ⬆  {filename}")
-                    break
-                else:
-                    raise Exception(
-                        f"Upload failed: {upload_resp.status_code} {upload_resp.text[:200]}"
-                    )
+                print(f"    ⬆  {filename}")
+                break
 
             except Exception as e:
                 print(f"    ⚠️ Attempt {attempt+1} failed for {filename}: {e}")
