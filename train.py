@@ -16,7 +16,6 @@ import pandas as pd
 import torch
 import nltk
 import gspread
-import google.auth.transport.requests
 
 from collections import Counter
 from datetime import datetime
@@ -31,6 +30,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report
 from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials as OAuthCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
@@ -42,10 +42,6 @@ nltk.download("averaged_perceptron_tagger", quiet=True)
 GDRIVE_SHEET_ID        = "1uHBQs85jZVoYP5h9lLRQuBxtEoG9Db3CCWZ5n4Dz7xU"
 GDRIVE_SHEET_TAB       = "Sheet2"
 DRIVE_PARENT_NAME      = "RA_model"
-# ✅ FIX: Hardcoded folder ID so uploads go into your personal Drive (Likitha M)
-#         and use your storage quota instead of the service account's (zero quota).
-#         Get this from the URL when you open RA_model in Drive:
-#         https://drive.google.com/drive/folders/PASTE_YOUR_FOLDER_ID_HERE
 DRIVE_PARENT_FOLDER_ID = "1HfgqJyPg1R4hL7RUQHC-XjQRECIPuSt7"
 
 RA_ROOT        = "./RA_model"
@@ -73,6 +69,7 @@ HIST_VAL_SAMPLE_N        = 50
 
 # ── GOOGLE DRIVE HELPERS ────────────────────────────────────────────────────
 def get_drive_service():
+    """Service account — used for reading sheets, listing & downloading folders."""
     creds_json = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
     creds = Credentials.from_service_account_info(
         creds_json,
@@ -80,14 +77,20 @@ def get_drive_service():
     )
     return build('drive', 'v3', credentials=creds)
 
-def get_access_token():
-    creds_json = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
-    creds = Credentials.from_service_account_info(
-        creds_json,
-        scopes=["https://www.googleapis.com/auth/drive"]
+def get_personal_drive_service():
+    """
+    Personal OAuth — used ONLY for uploading.
+    Files uploaded via this service count against Likitha M's Drive quota,
+    not the service account's (which is zero).
+    """
+    creds = OAuthCredentials(
+        token=None,
+        refresh_token=os.environ['GDRIVE_REFRESH_TOKEN'],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ['GDRIVE_CLIENT_ID'],
+        client_secret=os.environ['GDRIVE_CLIENT_SECRET'],
     )
-    creds.refresh(google.auth.transport.requests.Request())
-    return creds.token
+    return build('drive', 'v3', credentials=creds)
 
 def _find_folder_id(service, name, parent_id=None):
     q = (f"name='{name}' and mimeType='application/vnd.google-apps.folder' "
@@ -102,12 +105,9 @@ def _create_folder(service, name, parent_id=None):
     body = {'name': name, 'mimeType': 'application/vnd.google-apps.folder'}
     if parent_id:
         body['parents'] = [parent_id]
-    # ✅ FIX: supportsAllDrives=True allows the service account to create
-    #         subfolders inside a folder it has Editor access to (but doesn't own)
     return service.files().create(
         body=body,
         fields='id',
-        supportsAllDrives=True,
     ).execute()['id']
 
 def _list_subfolders(service, parent_id):
@@ -136,11 +136,15 @@ def download_drive_folder(service, folder_id, local_path):
             out.write(buf.getvalue())
         print(f"    ⬇  {f['name']}")
 
-def upload_folder_to_drive(service, local_path, drive_folder_name, parent_id=None):
-    # Create or find the subfolder inside the parent (owned by personal account)
-    folder_id = _find_folder_id(service, drive_folder_name, parent_id=parent_id)
+def upload_folder_to_drive(personal_service, local_path, drive_folder_name, parent_id=None):
+    """
+    Upload using personal OAuth credentials (Likitha M).
+    This means files are owned by your personal account → uses your quota.
+    """
+    # Find or create the subfolder using personal credentials
+    folder_id = _find_folder_id(personal_service, drive_folder_name, parent_id=parent_id)
     if folder_id is None:
-        folder_id = _create_folder(service, drive_folder_name, parent_id=parent_id)
+        folder_id = _create_folder(personal_service, drive_folder_name, parent_id=parent_id)
 
     for filename in os.listdir(local_path):
         filepath = os.path.join(local_path, filename)
@@ -148,8 +152,8 @@ def upload_folder_to_drive(service, local_path, drive_folder_name, parent_id=Non
             continue
 
         q = f"name='{filename}' and '{folder_id}' in parents and trashed=false"
-        existing = service.files().list(
-            q=q, fields="files(id)", supportsAllDrives=True, includeItemsFromAllDrives=True
+        existing = personal_service.files().list(
+            q=q, fields="files(id)"
         ).execute().get('files', [])
 
         media = MediaFileUpload(filepath, resumable=True)
@@ -157,20 +161,16 @@ def upload_folder_to_drive(service, local_path, drive_folder_name, parent_id=Non
         for attempt in range(3):
             try:
                 if existing:
-                    # Update existing file
-                    service.files().update(
+                    personal_service.files().update(
                         fileId=existing[0]['id'],
                         media_body=media,
-                        supportsAllDrives=True,
                     ).execute()
                 else:
-                    # Create new file inside folder owned by personal account
                     file_meta = {'name': filename, 'parents': [folder_id]}
-                    service.files().create(
+                    personal_service.files().create(
                         body=file_meta,
                         media_body=media,
                         fields='id',
-                        supportsAllDrives=True,
                     ).execute()
 
                 print(f"    ⬆  {filename}")
@@ -242,7 +242,6 @@ def main():
     print("\nSTEP 3 — Loading previous training run from Drive...")
     os.makedirs(RA_ROOT, exist_ok=True)
 
-    # ✅ FIX: Use hardcoded folder ID — no search needed, works with service account
     parent_id = DRIVE_PARENT_FOLDER_ID
 
     subs = _list_subfolders(drive_service, parent_id)
@@ -470,14 +469,12 @@ def main():
 
     # ── STEP 10: Upload to Google Drive ───────────────────────────────────────
     print("\nSTEP 10 — Uploading model to Google Drive...")
-    # Rebuild drive service — connection times out during long training
-    drive_service = get_drive_service()
-
-    # ✅ FIX: Use hardcoded folder ID — files go into Likitha M's Drive (your quota)
-    parent_id = DRIVE_PARENT_FOLDER_ID
+    # Use personal OAuth credentials so files are owned by Likitha M
+    # and count against personal Drive quota (not service account's zero quota)
+    personal_service = get_personal_drive_service()
 
     upload_folder_to_drive(
-        drive_service, NEW_MODEL_PATH, RUN_NAME, parent_id=parent_id
+        personal_service, NEW_MODEL_PATH, RUN_NAME, parent_id=DRIVE_PARENT_FOLDER_ID
     )
     print(f"  ✅ Uploaded {RUN_NAME} to Drive/{DRIVE_PARENT_NAME}/")
     print("\n" + "=" * 60)
