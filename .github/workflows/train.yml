@@ -1,38 +1,33 @@
 name: boAt BERT Delta Training
-
 on:
   workflow_dispatch:
   repository_dispatch:
     types: [run-training]
-
 jobs:
   train:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: pip-train-${{ hashFiles('requirements.txt') }}
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run delta training
         env:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
         run: python train.py
-
       - name: Upload model as GitHub Artifact
         if: success()
         uses: actions/upload-artifact@v4
@@ -40,7 +35,6 @@ jobs:
           name: RA_model_${{ github.run_id }}
           path: RA_model/
           retention-days: 30
-
       - name: Send training summary email
         if: success()
         uses: dawidd6/action-send-mail@v3
@@ -54,15 +48,11 @@ jobs:
           from: boAt Trainer
           body: |
             Delta training completed successfully!
-
             Model saved to Google Drive under RA_model/ folder.
             Artifact also available on GitHub for 30 days.
-
             View run:
             https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
             — boAt R&D QA Automation
-
       - name: Send failure email
         if: failure()
         uses: dawidd6/action-send-mail@v3
@@ -76,8 +66,6 @@ jobs:
           from: boAt Trainer
           body: |
             Delta training failed!
-
             Check logs:
             https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
             — boAt R&D QA Automation
