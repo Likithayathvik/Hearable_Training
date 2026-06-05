@@ -39,9 +39,14 @@ nltk.download("wordnet", quiet=True)
 nltk.download("averaged_perceptron_tagger", quiet=True)
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
-GDRIVE_SHEET_ID   = "1uHBQs85jZVoYP5h9lLRQuBxtEoG9Db3CCWZ5n4Dz7xU"
-GDRIVE_SHEET_TAB  = "Sheet2"
-DRIVE_PARENT_NAME = "RA_model"
+GDRIVE_SHEET_ID        = "1uHBQs85jZVoYP5h9lLRQuBxtEoG9Db3CCWZ5n4Dz7xU"
+GDRIVE_SHEET_TAB       = "Sheet2"
+DRIVE_PARENT_NAME      = "RA_model"
+# ✅ FIX: Hardcoded folder ID so uploads go into your personal Drive (Likitha M)
+#         and use your storage quota instead of the service account's (zero quota).
+#         Get this from the URL when you open RA_model in Drive:
+#         https://drive.google.com/drive/folders/PASTE_YOUR_FOLDER_ID_HERE
+DRIVE_PARENT_FOLDER_ID = "1HfgqJyPg1R4hL7RUQHC-XjQRECIPuSt7"
 
 RA_ROOT        = "./RA_model"
 OLD_MODEL_PATH = f"{RA_ROOT}/_previous"
@@ -97,7 +102,13 @@ def _create_folder(service, name, parent_id=None):
     body = {'name': name, 'mimeType': 'application/vnd.google-apps.folder'}
     if parent_id:
         body['parents'] = [parent_id]
-    return service.files().create(body=body, fields='id').execute()['id']
+    # ✅ FIX: supportsAllDrives=True allows the service account to create
+    #         subfolders inside a folder it has Editor access to (but doesn't own)
+    return service.files().create(
+        body=body,
+        fields='id',
+        supportsAllDrives=True,
+    ).execute()['id']
 
 def _list_subfolders(service, parent_id):
     res = service.files().list(
@@ -262,9 +273,8 @@ def main():
     print("\nSTEP 3 — Loading previous training run from Drive...")
     os.makedirs(RA_ROOT, exist_ok=True)
 
-    parent_id = _find_folder_id(drive_service, DRIVE_PARENT_NAME)
-    if parent_id is None:
-        raise SystemExit(f"❌ Drive folder '{DRIVE_PARENT_NAME}' not found.")
+    # ✅ FIX: Use hardcoded folder ID — no search needed, works with service account
+    parent_id = DRIVE_PARENT_FOLDER_ID
 
     subs = _list_subfolders(drive_service, parent_id)
     run_subs = [
@@ -493,9 +503,9 @@ def main():
     print("\nSTEP 10 — Uploading model to Google Drive...")
     # Rebuild drive service — connection times out during long training
     drive_service = get_drive_service()
-    parent_id = _find_folder_id(drive_service, DRIVE_PARENT_NAME)
-    if parent_id is None:
-        parent_id = _create_folder(drive_service, DRIVE_PARENT_NAME)
+
+    # ✅ FIX: Use hardcoded folder ID — files go into Likitha M's Drive (your quota)
+    parent_id = DRIVE_PARENT_FOLDER_ID
 
     upload_folder_to_drive(
         drive_service, NEW_MODEL_PATH, RUN_NAME, parent_id=parent_id
